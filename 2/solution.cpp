@@ -128,6 +128,64 @@ execute_command_fds(const command *cmd, int stdin_fd, int stdout_fd)
 	_exit(1);
 }
 
+static bool
+is_builtin_command(const command *cmd)
+{	if (cmd->exe == "cd" || cmd->exe == "exit") {
+		return true;
+	}
+	return false;
+}
+
+static char*
+get_home_directory()
+{
+	return getenv("HOME");
+}
+
+static void
+execute_command_builtin(const command *cmd, bool is_output_piped)
+{	
+	if (cmd->exe == "cd") {
+		const char *path;
+		if (cmd->args.empty()) {
+			path = get_home_directory();
+			if (path == NULL) {
+				return;
+			}
+		}
+		
+		path = cmd->args[0].c_str();
+		if (chdir(path) != 0) {
+			perror("cd");
+		}
+	} else if (cmd->exe == "exit") {
+		if (cmd->args.size() > 1) {
+			fprintf(stderr, "exit: too many arguments\n");
+			return;
+		}
+
+		int exit_code = 0;
+		if (cmd->args.size() == 1) {
+			char *endptr;
+			exit_code = strtol(cmd->args[0].c_str(), &endptr, 10) % 256;
+			if (*endptr != '\0') {
+				fprintf(stderr, "exit: numeric argument required\n");
+				exit_code = 2;
+			}
+		}
+
+		if (is_output_piped) {
+			return;
+		}
+
+		exit(exit_code);
+	} else {
+		assert(false);
+	}
+}
+
+// TODO: replace with cmd.
+
 static int
 process_expr_command(const expr *e, int out_fd)
 {
@@ -160,11 +218,15 @@ process_expr_commands_pipe(const expr **exprs, size_t num, int out_fd)
     for (size_t i = 0; i < num; i++) {
         assert(exprs[i]->type == EXPR_TYPE_COMMAND);
 		const command *cmd = &(*exprs[i]->cmd);
+
+		bool is_last = (i == num - 1);
+		if (is_builtin_command(cmd)) {
+			execute_command_builtin(cmd, !is_last);
+			continue;
+		}
+		
         
         int curr_pipe[2];
-        bool is_last = (i == num - 1);
-        bool is_first = (i == 0);
-        
         if (!is_last) {
             if (pipe(curr_pipe) == -1) {
                 perror("pipe");
@@ -179,14 +241,13 @@ process_expr_commands_pipe(const expr **exprs, size_t num, int out_fd)
 				close(curr_pipe[0]);
 			}
 
-			int stdin_fd = is_first ? -1 : prev_pipe_read;
         	int stdout_fd = is_last ? out_fd : curr_pipe[1];
 	
-			execute_command_fds(cmd, stdin_fd, stdout_fd);
+			execute_command_fds(cmd, prev_pipe_read, stdout_fd);
 		} else if (pid > 0) {
             pids[i] = pid;
             
-            if (!is_first) {
+            if (prev_pipe_read != -1) {
                 close(prev_pipe_read);
             }
             
