@@ -130,10 +130,8 @@ execute_command_fds(const command *cmd, int stdin_fd, int stdout_fd)
 
 static bool
 is_builtin_command(const command *cmd)
-{	if (cmd->exe == "cd" || cmd->exe == "exit") {
-		return true;
-	}
-	return false;
+{	
+	return (cmd->exe == "cd" || cmd->exe == "exit");
 }
 
 static char*
@@ -383,7 +381,7 @@ get_out_fd_command_line(const struct command_line *line, int *out_fd)
 static void
 execute_command_line(const struct command_line *line)
 {
-	printf_verbose_command_line(line);
+	// printf_verbose_command_line(line);
 
 	if (line->exprs.empty())
 		return;

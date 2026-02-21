@@ -4,11 +4,11 @@ project(Shell CXX)
 set(CMAKE_CXX_STANDARD 17)
 
 set(COMMON_FLAGS
-    #-Wextra
-    #-Werror
-    #-Wall
-    #-Wno-gnu-folding-constant
-    #-g
+    # -Wextra
+    # -Werror
+    # -Wall
+    # -Wno-gnu-folding-constant
+    # -g
 )
 add_compile_options(${COMMON_FLAGS})
 
