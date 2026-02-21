@@ -84,7 +84,7 @@ printf_verbose_command_line(const struct command_line *line)
 	}
 }
 
-static int
+static void
 execute_command(const command *cmd)
 {
 	// TODO: add cd and exit support.
@@ -97,10 +97,8 @@ execute_command(const command *cmd)
 	}
 	argv[cmd->args.size() + 1] = NULL;
 	
-	int res = execvp(argv[0], (char* const*)argv);
-
+	execvp(argv[0], (char* const*)argv);
 	perror("execvp");
-	return res;
 }
 
 static void
@@ -126,9 +124,8 @@ execute_command_fds(const command *cmd, int stdin_fd, int stdout_fd)
 		close(stdout_fd);
 	}
 
-	if (execute_command(cmd) != 0) {
-		_exit(1);
-	}
+	execute_command(cmd);
+	_exit(1);
 }
 
 static int
