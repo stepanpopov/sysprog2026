@@ -103,42 +103,32 @@ execute_command(const command *cmd)
 	return res;
 }
 
-static pid_t
-execute_command_child(const command *cmd, int stdin_fd, int stdout_fd)
+static void
+execute_command_fds(const command *cmd, int stdin_fd, int stdout_fd)
 {
 	assert(cmd != NULL);
 
-    pid_t pid = fork();
-	if (pid < 0) {
-		perror("fork");
-		return -1;
+	// Child process - setup stdin
+	if (stdin_fd != -1) {
+		if (dup2(stdin_fd, STDIN_FILENO) == -1) {
+			perror("dup2");
+			_exit(1);
+		}
+		close(stdin_fd);
 	}
 
-    if (pid == 0) {
-        // Child process - setup stdin
-        if (stdin_fd != -1) {
-            if (dup2(stdin_fd, STDIN_FILENO) == -1) {
-                perror("dup2");
-                _exit(1);
-            }
-            close(stdin_fd);
-        }
-        
-        // Child process - setup stdout
-        if (stdout_fd != -1) {
-            if (dup2(stdout_fd, STDOUT_FILENO) == -1) {
-                perror("dup2");
-                _exit(1);
-            }
-            close(stdout_fd);
-        }
-        
-        if (execute_command(cmd) != 0) {
-            _exit(1);
-        }
-    }
-    
-    return pid;
+	// Child process - setup stdout
+	if (stdout_fd != -1) {
+		if (dup2(stdout_fd, STDOUT_FILENO) == -1) {
+			perror("dup2");
+			_exit(1);
+		}
+		close(stdout_fd);
+	}
+
+	if (execute_command(cmd) != 0) {
+		_exit(1);
+	}
 }
 
 static int
@@ -146,14 +136,18 @@ process_expr_command(const expr *e, int out_fd)
 {
 	assert(e->type == EXPR_TYPE_COMMAND);
 
-    pid_t pid = execute_command_child(&(*e->cmd), -1, out_fd);
+	pid_t pid = fork();
 	if (pid < 0) {
+		perror("fork");
 		return -1;
+	} else if (pid == 0) {
+    	execute_command_fds(&(*e->cmd), -1, out_fd);
 	}
-
 	assert(pid > 0);
+
 	int status;
 	waitpid(pid, &status, 0);
+
 	return 0;
 }
 
@@ -181,13 +175,18 @@ process_expr_commands_pipe(const expr **exprs, size_t num, int out_fd)
                 goto cleanup;
             }
         }
-        
-        int stdin_fd = is_first ? -1 : prev_pipe_read;
-        int stdout_fd = is_last ? out_fd : curr_pipe[1];
-        
-        pid_t pid = execute_command_child(cmd, stdin_fd, stdout_fd);
-        
-        if (pid > 0) {
+
+		pid_t pid = fork();
+		if (pid == 0) {
+			if (!is_last) {
+				close(curr_pipe[0]);
+			}
+
+			int stdin_fd = is_first ? -1 : prev_pipe_read;
+        	int stdout_fd = is_last ? out_fd : curr_pipe[1];
+	
+			execute_command_fds(cmd, stdin_fd, stdout_fd);
+		} else if (pid > 0) {
             pids[i] = pid;
             
             if (!is_first) {
@@ -204,14 +203,9 @@ process_expr_commands_pipe(const expr **exprs, size_t num, int out_fd)
                 close(curr_pipe[0]);
                 close(curr_pipe[1]);
             }
-			if (prev_pipe_read != -1) {
-                close(prev_pipe_read);
-            }
             goto cleanup;
         }
     }
-
-    close(prev_pipe_read);
     
     // Wait for all children
     for (size_t i = 0; i < num; i++) {
@@ -220,6 +214,9 @@ process_expr_commands_pipe(const expr **exprs, size_t num, int out_fd)
     }
 
 cleanup:
+	if (prev_pipe_read != -1) {
+        close(prev_pipe_read);
+    }
     delete[] pids;
     return result;
 }
