@@ -10,53 +10,47 @@
 static void
 execute_command_line(const struct command_line *line);
 
-static int
-process_expr_command(const expr *e, const struct command_line *line);
+// static int
+// process_expr_command(const expr *e, const struct command_line *line);
 
-static int
-redirect_output_command_line(const struct command_line *line);
+// static int
+// redirect_output_command_line(const struct command_line *line);
 
-static int
-execute_command_child(const command &cmd);
+// static int
+// execute_command_child(const command &cmd);
 
 
 // PIPE
-static void pipe_close_read(int pipefd[2]) {
-	close(pipefd[0]);
-}
+// static void pipe_close_read(int pipefd[2]) {
+// 	close(pipefd[0]);
+// }
 
-static int pipe_dup_stdin(int pipefd[2]) {
-	if (dup2(pipefd[0], STDIN_FILENO) == -1) {
-        perror("dup2 failed");
-        return -1;
-    }
-	close(pipefd[0]);
-}
+// static int pipe_dup_stdin(int pipefd[2]) {
+// 	if (dup2(pipefd[0], STDIN_FILENO) == -1) {
+//         perror("dup2 failed");
+//         return -1;
+//     }
+// 	close(pipefd[0]);
+// }
 
-static void pipe_close_write(int pipefd[2]) {
-	close(pipefd[1]);
-}
+// static void pipe_close_write(int pipefd[2]) {
+// 	close(pipefd[1]);
+// }
 
-static int pipe_dup_stdout(int pipefd[2]) {
-	if (dup2(pipefd[1], STDOUT_FILENO) == -1) {
-        perror("dup2 failed");
-        return -1;
-    }
-	close(pipefd[1]);
-}
+// static int pipe_dup_stdout(int pipefd[2]) {
+// 	if (dup2(pipefd[1], STDOUT_FILENO) == -1) {
+//         perror("dup2 failed");
+//         return -1;
+//     }
+// 	close(pipefd[1]);
+// }
 
 //
 
 
-
-
-
-
-static void
-execute_command_line(const struct command_line *line)
+static void 
+printf_verbose_command_line(const struct command_line *line) 
 {
-	/* REPLACE THIS CODE WITH ACTUAL COMMAND EXECUTION */
-
 	assert(line != NULL);
 	printf("================================\n");
 	printf("Command line:\n");
@@ -78,10 +72,6 @@ execute_command_line(const struct command_line *line)
 			for (const std::string& arg : e.cmd->args)
 				printf(" %s", arg.c_str());
 			printf("\n");
-
-			if (process_expr_command(&e, line) != 0) {
-				return;
-			}
 		} else if (e.type == EXPR_TYPE_PIPE) {
 			printf("\tPIPE\n");
 		} else if (e.type == EXPR_TYPE_AND) {
@@ -94,10 +84,36 @@ execute_command_line(const struct command_line *line)
 	}
 }
 
-static pid_t
-fork_and_execute_with_fds(const expr *e, int stdin_fd, int stdout_fd)
+static int
+execute_command(const command *cmd)
 {
+	// TODO: add cd and exit support.
+	assert(cmd != NULL);
+
+	const char **argv = new const char*[cmd->args.size() + 2];
+	argv[0] = cmd->exe.c_str();
+	for (size_t i = 0; i < cmd->args.size(); i++) {
+		argv[i + 1] = cmd->args[i].c_str();
+	}
+	argv[cmd->args.size() + 1] = NULL;
+	
+	int res = execvp(argv[0], (char* const*)argv);
+
+	perror("execvp");
+	return res;
+}
+
+static pid_t
+execute_command_child(const command *cmd, int stdin_fd, int stdout_fd)
+{
+	assert(cmd != NULL);
+
     pid_t pid = fork();
+	if (pid < 0) {
+		perror("fork");
+		return -1;
+	}
+
     if (pid == 0) {
         // Child process - setup stdin
         if (stdin_fd != -1) {
@@ -117,7 +133,7 @@ fork_and_execute_with_fds(const expr *e, int stdin_fd, int stdout_fd)
             close(stdout_fd);
         }
         
-        if (execute_command_child(*e->cmd) != 0) {
+        if (execute_command(cmd) != 0) {
             _exit(1);
         }
     }
@@ -126,27 +142,24 @@ fork_and_execute_with_fds(const expr *e, int stdin_fd, int stdout_fd)
 }
 
 static int
-process_single_command(const expr *e)
+process_expr_command(const expr *e, int out_fd)
 {
-    pid_t pid = fork_and_execute_with_fds(e, -1, -1);
-    if (pid > 0) {
-        int status;
-        waitpid(pid, &status, 0);
-        return 0;
-    } else if (pid < 0) {
-        perror("fork");
-        return -1;
-    }
-    return 0;
+	assert(e->type == EXPR_TYPE_COMMAND);
+
+    pid_t pid = execute_command_child(&(*e->cmd), -1, out_fd);
+	if (pid < 0) {
+		return -1;
+	}
+
+	assert(pid > 0);
+	int status;
+	waitpid(pid, &status, 0);
+	return 0;
 }
 
 static int 
-process_commands_pipe(const expr **exprs, size_t num)
+process_expr_commands_pipe(const expr **exprs, size_t num, int out_fd)
 {
-    // if (num == 0) return 0;
-    // if (num == 1) {
-    //     return process_single_command(exprs[0]);
-    // }
 	assert(num > 0);
     
     pid_t *pids = new pid_t[num];
@@ -155,6 +168,7 @@ process_commands_pipe(const expr **exprs, size_t num)
     
     for (size_t i = 0; i < num; i++) {
         assert(exprs[i]->type == EXPR_TYPE_COMMAND);
+		const command *cmd = &(*exprs[i]->cmd);
         
         int curr_pipe[2];
         bool is_last = (i == num - 1);
@@ -169,9 +183,9 @@ process_commands_pipe(const expr **exprs, size_t num)
         }
         
         int stdin_fd = is_first ? -1 : prev_pipe_read;
-        int stdout_fd = is_last ? -1 : curr_pipe[1];
+        int stdout_fd = is_last ? out_fd : curr_pipe[1];
         
-        pid_t pid = fork_and_execute_with_fds(exprs[i], stdin_fd, stdout_fd);
+        pid_t pid = execute_command_child(cmd, stdin_fd, stdout_fd);
         
         if (pid > 0) {
             pids[i] = pid;
@@ -185,8 +199,14 @@ process_commands_pipe(const expr **exprs, size_t num)
                 prev_pipe_read = curr_pipe[0];
             }
         } else {
-            perror("fork");
             result = -1;
+			if (!is_last) {
+                close(curr_pipe[0]);
+                close(curr_pipe[1]);
+            }
+			if (prev_pipe_read != -1) {
+                close(prev_pipe_read);
+            }
             goto cleanup;
         }
     }
@@ -204,54 +224,55 @@ cleanup:
     return result;
 }
 
-static int
-process_expr_command(const expr *e, const struct command_line *line)
-{
-	assert(e->type == EXPR_TYPE_COMMAND);
+// static int
+// process_expr_command(const expr *e, const struct command_line *line)
+// {
+// 	assert(e->type == EXPR_TYPE_COMMAND);
 
-	// Handle 'cd' as a special builtin command in the parent process
-	if (e->cmd->exe == "cd") {
-		// cd should change the directory of the parent shell
-		if (e->cmd->args.empty()) {
-			fprintf(stderr, "cd: missing argument\n");
-			return -1;
-		}
+// 	// Handle 'cd' as a special builtin command in the parent process
+// 	if (e->cmd->exe == "cd") {
+// 		// cd should change the directory of the parent shell
+// 		if (e->cmd->args.empty()) {
+// 			fprintf(stderr, "cd: missing argument\n");
+// 			return -1;
+// 		}
 		
-		const char *path = e->cmd->args[0].c_str();
-		if (chdir(path) != 0) {
-			perror("cd");
-			return -1;
-		}
-		return 0;
-	}
-	//
+// 		const char *path = e->cmd->args[0].c_str();
+// 		if (chdir(path) != 0) {
+// 			perror("cd");
+// 			return -1;
+// 		}
+// 		return 0;
+// 	}
+// 	//
 
-	pid_t pid = fork();
-    if (pid == 0) {
-        if (redirect_output_command_line(line) != 0) {
-            return -1;
-        }
+// 	pid_t pid = fork();
+//     if (pid == 0) {
+//         if (redirect_output_command_line(line) != 0) {
+//             return -1;
+//         }
 
-        if (execute_command_child(*e->cmd) != 0) {
-			return -1;
-		}
+//         if (execute_command_child(*e->cmd) != 0) {
+// 			return -1;
+// 		}
 
-        _exit(0);
-    } else if (pid > 0) {
-        // Parent process - wait for child
-        int status;
-        waitpid(pid, &status, 0);
-    } else {
-        perror("fork");
-    }
+//         _exit(0);
+//     } else if (pid > 0) {
+//         // Parent process - wait for child
+//         int status;
+//         waitpid(pid, &status, 0);
+//     } else {
+//         perror("fork");
+//     }
 
-	return 0;
-}
+// 	return 0;
+// }
 
 static int
-redirect_output_command_line(const struct command_line *line)
+get_out_fd_command_line(const struct command_line *line, int *out_fd)
 {
 	if (line->out_type == OUTPUT_TYPE_STDOUT) {
+		*out_fd = -1;
 		return 0;
 	}
 
@@ -267,33 +288,81 @@ redirect_output_command_line(const struct command_line *line)
 	int fd = open(line->out_file.c_str(), o_flags, 0644);
 	if (fd < 0) {
 		perror("open");
-		return 1;
+		return -1;
 	}
 
-	// TODO: check errors. 
-	dup2(fd, STDOUT_FILENO);
-	close(fd);
-
+	*out_fd = fd;
 	return 0;
 }
 
 
-static int
-execute_command_child(const command *cmd)
+// static int
+// redirect_output_command_line(const struct command_line *line)
+// {
+// 	if (line->out_type == OUTPUT_TYPE_STDOUT) {
+// 		return 0;
+// 	}
+
+// 	int o_flags = O_WRONLY | O_CREAT;
+// 	if (line->out_type == OUTPUT_TYPE_FILE_NEW) {
+// 		o_flags |= O_TRUNC;
+// 	} else if (line->out_type == OUTPUT_TYPE_FILE_APPEND) {
+// 		o_flags |= O_APPEND;
+// 	} else {
+// 		assert(false);
+// 	}
+
+// 	int fd = open(line->out_file.c_str(), o_flags, 0644);
+// 	if (fd < 0) {
+// 		perror("open");
+// 		return 1;
+// 	}
+
+// 	// TODO: check errors. 
+// 	dup2(fd, STDOUT_FILENO);
+// 	close(fd);
+
+// 	return 0;
+// }
+
+static void
+execute_command_line(const struct command_line *line)
 {
-	// TODO: add cd and exit support.
+	printf_verbose_command_line(line);
 
-	const char **argv = new const char*[cmd->args.size() + 2];
-	argv[0] = cmd->exe.c_str();
-	for (size_t i = 0; i < cmd->args.size(); i++) {
-		argv[i + 1] = cmd->args[i].c_str();
-	}
-	argv[cmd->args.size() + 1] = NULL;
+	if (line->exprs.empty())
+		return;
+
 	
-	int res = execvp(argv[0], (char* const*)argv);
+	int out_fd;
+	if (get_out_fd_command_line(line, &out_fd) != 0) {
+		// TODO: handle error
+		return;
+	}
 
-	perror("execvp");
-	return res;
+	if (line->exprs.size() == 1) {
+		assert(line->exprs.front().type == EXPR_TYPE_COMMAND);
+		process_expr_command(&line->exprs.front(), out_fd);
+	} else {
+		std::vector<const expr*> piped_exprs;
+		for (const expr &e : line->exprs) {
+			switch (e.type) {
+			case EXPR_TYPE_PIPE:
+				break;
+			case EXPR_TYPE_AND:
+			case EXPR_TYPE_OR:
+				assert(("Unsupported AND/OR expression", false)); // TODO: support AND and OR
+				break;
+			case EXPR_TYPE_COMMAND:
+				piped_exprs.push_back(&e);
+				break;
+			default:
+				assert(("Unsupported expression type", false));
+			}
+		}
+		process_expr_commands_pipe(piped_exprs.data(), piped_exprs.size(), out_fd);
+	}
+	close(out_fd);
 }
 
 int
