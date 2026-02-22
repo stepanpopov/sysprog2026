@@ -9,8 +9,6 @@
 
 // #define DEBUG_CMD // Uncomment for debug.
 
-#define ALWAYS_INLINE inline __attribute__((always_inline))
-
 #define STATUS_CD_FAILED 1
 #define STATUS_EXIT_FAILED_TOO_MANY_ARGS 1
 #define STATUS_EXIT_FAILED_INVALID_ARG 2
@@ -56,6 +54,25 @@ printf_debug_verbose_command_line(const struct command_line *line)
 }
 #endif
 
+// -- Helpers.
+#define is_builtin_command(cmd) (((cmd)->exe == "cd") || ((cmd)->exe == "exit"))
+#define get_home_directory() getenv("HOME")
+
+static int waitpid_exit_code(pid_t pid);
+// --
+
+static void execute_command_child(const command *cmd);
+static void execute_command_child_fds(const command *cmd, int stdin_fd, int stdout_fd);
+static void execute_command_builtin(const command *cmd, bool is_in_pipe, int *status, bool *need_exit);
+
+static int process_command(const command *cmd, int out_fd, int *status, bool *need_exit);
+static int process_commands_pipe(const command **cmds, size_t num, int out_fd, int *status, bool *need_exit);
+
+static int get_out_fd_command_line(const struct command_line *line, int *out_fd);
+static void execute_command_line(const struct command_line *line, int *status, bool *need_exit);
+
+// ----------------------------------------
+
 static void
 execute_command_child(const command *cmd)
 {
@@ -70,6 +87,7 @@ execute_command_child(const command *cmd)
 	
 	execvp(argv[0], (char* const*)argv);
 	perror("execvp");
+	_exit(1);
 }
 
 static void
@@ -96,19 +114,6 @@ execute_command_child_fds(const command *cmd, int stdin_fd, int stdout_fd)
 	}
 
 	execute_command_child(cmd);
-	_exit(1);
-}
-
-static ALWAYS_INLINE bool
-is_builtin_command(const command *cmd)
-{	
-	return (cmd->exe == "cd" || cmd->exe == "exit");
-}
-
-static ALWAYS_INLINE char*
-get_home_directory()
-{
-	return getenv("HOME");
 }
 
 static void
@@ -182,8 +187,6 @@ waitpid_exit_code(pid_t pid)
     
     return 255;
 }
-
-// TODO: replace with cmd.
 
 static int
 process_command(const command *cmd, int out_fd, int *status, bool *need_exit)
