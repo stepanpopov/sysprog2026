@@ -9,8 +9,9 @@
 
 // #define DEBUG_CMD
 
+#ifdef DEBUG_CMD
 static void 
-printf_verbose_command_line(const struct command_line *line) 
+printf_debug_verbose_command_line(const struct command_line *line) 
 {
 	assert(line != NULL);
 	printf("================================\n");
@@ -45,6 +46,7 @@ printf_verbose_command_line(const struct command_line *line)
 		}
 	}
 }
+#endif
 
 static void
 execute_command_child(const command *cmd)
@@ -342,11 +344,12 @@ static void
 execute_command_line(const struct command_line *line, int *status, bool *need_exit)
 {
 #ifdef DEBUG_CMD
-    printf_verbose_command_line(line);
+    printf_debug_verbose_command_line(line);
 #endif
 
-    if (line->exprs.empty())
+    if (line->exprs.empty()) {
         return;
+	}
 
 	*need_exit = false;
 	
