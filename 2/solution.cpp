@@ -13,6 +13,7 @@
 #define STATUS_EXIT_FAILED_TOO_MANY_ARGS 1
 #define STATUS_EXIT_FAILED_INVALID_ARG 2
 #define STATUS_OUTPUT_FORWARD_FAILED 1
+#define STATUS_EXEC_ERROR 1
 #define STATUS_INTERNAL_ERROR 255
 
 #ifdef DEBUG_CMD
@@ -87,7 +88,7 @@ execute_command_child(const command *cmd)
 	
 	execvp(argv[0], (char* const*)argv);
 	perror("execvp");
-	_exit(1);
+	_exit(STATUS_EXEC_ERROR);
 }
 
 static void
@@ -99,7 +100,7 @@ execute_command_child_fds(const command *cmd, int stdin_fd, int stdout_fd)
 	if (stdin_fd != -1) {
 		if (dup2(stdin_fd, STDIN_FILENO) == -1) {
 			perror("dup2");
-			_exit(1);
+			_exit(STATUS_INTERNAL_ERROR);
 		}
 		close(stdin_fd);
 	}
@@ -108,7 +109,7 @@ execute_command_child_fds(const command *cmd, int stdin_fd, int stdout_fd)
 	if (stdout_fd != -1) {
 		if (dup2(stdout_fd, STDOUT_FILENO) == -1) {
 			perror("dup2");
-			_exit(1);
+			_exit(STATUS_INTERNAL_ERROR);
 		}
 		close(stdout_fd);
 	}
