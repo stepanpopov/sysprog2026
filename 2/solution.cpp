@@ -7,47 +7,6 @@
 #include <fcntl.h>
 #include <string.h>
 
-static void
-execute_command_line(const struct command_line *line);
-
-// static int
-// process_expr_command(const expr *e, const struct command_line *line);
-
-// static int
-// redirect_output_command_line(const struct command_line *line);
-
-// static int
-// execute_command_child(const command &cmd);
-
-
-// PIPE
-// static void pipe_close_read(int pipefd[2]) {
-// 	close(pipefd[0]);
-// }
-
-// static int pipe_dup_stdin(int pipefd[2]) {
-// 	if (dup2(pipefd[0], STDIN_FILENO) == -1) {
-//         perror("dup2 failed");
-//         return -1;
-//     }
-// 	close(pipefd[0]);
-// }
-
-// static void pipe_close_write(int pipefd[2]) {
-// 	close(pipefd[1]);
-// }
-
-// static int pipe_dup_stdout(int pipefd[2]) {
-// 	if (dup2(pipefd[1], STDOUT_FILENO) == -1) {
-//         perror("dup2 failed");
-//         return -1;
-//     }
-// 	close(pipefd[1]);
-// }
-
-//
-
-
 static void 
 printf_verbose_command_line(const struct command_line *line) 
 {
@@ -88,7 +47,6 @@ printf_verbose_command_line(const struct command_line *line)
 static void
 execute_command_child(const command *cmd)
 {
-	// TODO: add cd and exit support.
 	assert(cmd != NULL);
 
 	const char **argv = new const char*[cmd->args.size() + 2];
@@ -141,13 +99,9 @@ get_home_directory()
 	return getenv("HOME");
 }
 
-// static int last_exit_code = 0;
-
 #define STATUS_CD_FAILED 1
 #define STATUS_EXIT_FAILED_TOO_MANY_ARGS 1
 #define STATUS_EXIT_FAILED_INVALID_ARG 2
-
-// TODO: support exit.
 
 static void
 execute_command_builtin(const command *cmd, bool is_in_pipe, int *status, bool *need_exit)
@@ -350,50 +304,6 @@ cleanup:
     return result;
 }
 
-// static int
-// process_expr_command(const expr *e, const struct command_line *line)
-// {
-// 	assert(e->type == EXPR_TYPE_COMMAND);
-
-// 	// Handle 'cd' as a special builtin command in the parent process
-// 	if (e->cmd->exe == "cd") {
-// 		// cd should change the directory of the parent shell
-// 		if (e->cmd->args.empty()) {
-// 			fprintf(stderr, "cd: missing argument\n");
-// 			return -1;
-// 		}
-		
-// 		const char *path = e->cmd->args[0].c_str();
-// 		if (chdir(path) != 0) {
-// 			perror("cd");
-// 			return -1;
-// 		}
-// 		return 0;
-// 	}
-// 	//
-
-// 	pid_t pid = fork();
-//     if (pid == 0) {
-//         if (redirect_output_command_line(line) != 0) {
-//             return -1;
-//         }
-
-//         if (execute_command_child(*e->cmd) != 0) {
-// 			return -1;
-// 		}
-
-//         _exit(0);
-//     } else if (pid > 0) {
-//         // Parent process - wait for child
-//         int status;
-//         waitpid(pid, &status, 0);
-//     } else {
-//         perror("fork");
-//     }
-
-// 	return 0;
-// }
-
 // Returns -1 if open file failed, 0 in other case.
 static int
 get_out_fd_command_line(const struct command_line *line, int *out_fd)
@@ -422,38 +332,6 @@ get_out_fd_command_line(const struct command_line *line, int *out_fd)
 	return 0;
 }
 
-
-// static int
-// redirect_output_command_line(const struct command_line *line)
-// {
-// 	if (line->out_type == OUTPUT_TYPE_STDOUT) {
-// 		return 0;
-// 	}
-
-// 	int o_flags = O_WRONLY | O_CREAT;
-// 	if (line->out_type == OUTPUT_TYPE_FILE_NEW) {
-// 		o_flags |= O_TRUNC;
-// 	} else if (line->out_type == OUTPUT_TYPE_FILE_APPEND) {
-// 		o_flags |= O_APPEND;
-// 	} else {
-// 		assert(false);
-// 	}
-
-// 	int fd = open(line->out_file.c_str(), o_flags, 0644);
-// 	if (fd < 0) {
-// 		perror("open");
-// 		return 1;
-// 	}
-
-// 	// TODO: check errors. 
-// 	dup2(fd, STDOUT_FILENO);
-// 	close(fd);
-
-// 	return 0;
-// }
-
-// TODO: 
-// - return
 
 #define STATUS_INTERNAL_ERROR 255
 #define STATUS_OUTPUT_FORWARD_FAILED 1
@@ -508,7 +386,6 @@ execute_command_line(const struct command_line *line, int *status, bool *need_ex
 int
 main(void)
 {
-	// signal(SIGTERM, sigterm_handler);
 	int last_status = 0;
 
 	const size_t buf_size = 1024;
