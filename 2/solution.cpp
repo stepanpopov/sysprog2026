@@ -7,6 +7,8 @@
 #include <fcntl.h>
 #include <string.h>
 
+// #define DEBUG_CMD
+
 static void 
 printf_verbose_command_line(const struct command_line *line) 
 {
@@ -339,10 +341,12 @@ get_out_fd_command_line(const struct command_line *line, int *out_fd)
 static void
 execute_command_line(const struct command_line *line, int *status, bool *need_exit)
 {
-	// printf_verbose_command_line(line);
+#ifdef DEBUG_CMD
+    printf_verbose_command_line(line);
+#endif
 
-	if (line->exprs.empty())
-		return;
+    if (line->exprs.empty())
+        return;
 
 	*need_exit = false;
 	
@@ -365,14 +369,13 @@ execute_command_line(const struct command_line *line, int *status, bool *need_ex
 				break;
 			case EXPR_TYPE_AND:
 			case EXPR_TYPE_OR:
-				// assert(("Unsupported AND/OR expression", false)); // TODO: support AND and OR
+				assert(false); // Unsupported AND/OR expression.
 				break;
 			case EXPR_TYPE_COMMAND:
 				piped_exprs.push_back(&e);
 				break;
 			default:
-				assert(false);
-				// assert(("Unsupported expression type", false));
+				assert(false); // Unsupported expression type.
 			}
 		}
 		if (process_expr_commands_pipe(piped_exprs.data(), piped_exprs.size(), out_fd, status, need_exit) != 0) {
