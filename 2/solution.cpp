@@ -7,7 +7,15 @@
 #include <fcntl.h>
 #include <string.h>
 
-// #define DEBUG_CMD
+// #define DEBUG_CMD // Uncomment for debug.
+
+#define ALWAYS_INLINE inline __attribute__((always_inline))
+
+#define STATUS_CD_FAILED 1
+#define STATUS_EXIT_FAILED_TOO_MANY_ARGS 1
+#define STATUS_EXIT_FAILED_INVALID_ARG 2
+#define STATUS_OUTPUT_FORWARD_FAILED 1
+#define STATUS_INTERNAL_ERROR 255
 
 #ifdef DEBUG_CMD
 static void 
@@ -91,21 +99,17 @@ execute_command_child_fds(const command *cmd, int stdin_fd, int stdout_fd)
 	_exit(1);
 }
 
-static bool
+static ALWAYS_INLINE bool
 is_builtin_command(const command *cmd)
 {	
 	return (cmd->exe == "cd" || cmd->exe == "exit");
 }
 
-static char*
+static ALWAYS_INLINE char*
 get_home_directory()
 {
 	return getenv("HOME");
 }
-
-#define STATUS_CD_FAILED 1
-#define STATUS_EXIT_FAILED_TOO_MANY_ARGS 1
-#define STATUS_EXIT_FAILED_INVALID_ARG 2
 
 static void
 execute_command_builtin(const command *cmd, bool is_in_pipe, int *status, bool *need_exit)
@@ -182,66 +186,62 @@ waitpid_exit_code(pid_t pid)
 // TODO: replace with cmd.
 
 static int
-process_expr_command(const expr *e, int out_fd, int *status, bool *need_exit)
+process_command(const command *cmd, int out_fd, int *status, bool *need_exit)
 {
-	assert(status != NULL);
-	assert(need_exit != NULL);
-	assert(e->type == EXPR_TYPE_COMMAND);
+    assert(status != NULL);
+    assert(need_exit != NULL);
 
-	const command *cmd = &(*e->cmd);
+    if (is_builtin_command(cmd)) {
+        execute_command_builtin(cmd, false, status, need_exit);
+        return 0;
+    }
+    *need_exit = false;
 
-	if (is_builtin_command(cmd)) {
-		execute_command_builtin(cmd, false, status, need_exit);
-		return 0;
-	}
-	*need_exit = false;
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        return -1;
+    } else if (pid == 0) {
+        execute_command_child_fds(cmd, -1, out_fd);
+    }
+    assert(pid > 0);
 
-	pid_t pid = fork();
-	if (pid < 0) {
-		perror("fork");
-		return -1;
-	} else if (pid == 0) {
-    	execute_command_child_fds(&(*e->cmd), -1, out_fd);
-	}
-	assert(pid > 0);
+    int status_res = waitpid_exit_code(pid);
+    if (status_res < 0) {
+        return -1;
+    }
+    *status = status_res;
 
-	int status_res = waitpid_exit_code(pid);
-	if (status_res < 0) {
-		return -1;
-	}
-	*status = status_res;
-
-	return 0;
+    return 0;
 }
 
 static int 
-process_expr_commands_pipe(const expr **exprs, size_t num, int out_fd, int *status, bool *need_exit)
+process_commands_pipe(const command **cmds, size_t num, int out_fd, int *status, bool *need_exit)
 {
-	assert(num > 0);
+    assert(num > 0);
     
     pid_t *pids = new pid_t[num];
-	memset(pids, -1, num * sizeof(pid_t));
+    memset(pids, -1, num * sizeof(pid_t));
 
-	pid_t last_pid = -1;
+    pid_t last_pid = -1;
     int prev_pipe_read = -1;
     int result = 0;
     
     for (size_t i = 0; i < num; i++) {
-        assert(exprs[i]->type == EXPR_TYPE_COMMAND);
-		const command *cmd = &(*exprs[i]->cmd);
+        const command *cmd = cmds[i];
 
-		if (is_builtin_command(cmd)) {
-			if (prev_pipe_read != -1) {
+        if (is_builtin_command(cmd)) {
+            if (prev_pipe_read != -1) {
                 close(prev_pipe_read);
-				prev_pipe_read = -1;
+                prev_pipe_read = -1;
             }
 
-			execute_command_builtin(cmd, true, status, need_exit);
-			continue;
-		}
+            execute_command_builtin(cmd, true, status, need_exit);
+            continue;
+        }
 
-		bool is_last = (i == num - 1);
-		
+        bool is_last = (i == num - 1);
+        
         int curr_pipe[2];
         if (!is_last) {
             if (pipe(curr_pipe) == -1) {
@@ -251,16 +251,16 @@ process_expr_commands_pipe(const expr **exprs, size_t num, int out_fd, int *stat
             }
         }
 
-		pid_t pid = fork();
-		if (pid == 0) {
-			if (!is_last) {
-				close(curr_pipe[0]);
-			}
+        pid_t pid = fork();
+        if (pid == 0) {
+            if (!is_last) {
+                close(curr_pipe[0]);
+            }
 
-        	int stdout_fd = is_last ? out_fd : curr_pipe[1];
-	
-			execute_command_child_fds(cmd, prev_pipe_read, stdout_fd);
-		} else if (pid > 0) {
+            int stdout_fd = is_last ? out_fd : curr_pipe[1];
+    
+            execute_command_child_fds(cmd, prev_pipe_read, stdout_fd);
+        } else if (pid > 0) {
             pids[i] = pid;
             
             if (prev_pipe_read != -1) {
@@ -273,7 +273,7 @@ process_expr_commands_pipe(const expr **exprs, size_t num, int out_fd, int *stat
             }
         } else {
             result = -1;
-			if (!is_last) {
+            if (!is_last) {
                 close(curr_pipe[0]);
                 close(curr_pipe[1]);
             }
@@ -282,26 +282,26 @@ process_expr_commands_pipe(const expr **exprs, size_t num, int out_fd, int *stat
     }
     
     for (size_t i = 0; i < num - 1; i++) {
-		if (pids[i] == -1)
-			continue;
+        if (pids[i] == -1)
+            continue;
 
         int status;
         waitpid(pids[i], &status, 0);
     }
 
-	last_pid = pids[num - 1];
-	if (last_pid != -1) {
-		int status_res = waitpid_exit_code(last_pid);
-		if (status_res < 0) {
-			result = -1;
-			goto cleanup;
-		}
-		*status = status_res;
-		*need_exit = false;
-	}
+    last_pid = pids[num - 1];
+    if (last_pid != -1) {
+        int status_res = waitpid_exit_code(last_pid);
+        if (status_res < 0) {
+            result = -1;
+            goto cleanup;
+        }
+        *status = status_res;
+        *need_exit = false;
+    }
 
 cleanup:
-	if (prev_pipe_read != -1) {
+    if (prev_pipe_read != -1) {
         close(prev_pipe_read);
     }
     delete[] pids;
@@ -336,10 +336,6 @@ get_out_fd_command_line(const struct command_line *line, int *out_fd)
 	return 0;
 }
 
-
-#define STATUS_INTERNAL_ERROR 255
-#define STATUS_OUTPUT_FORWARD_FAILED 1
-
 static void
 execute_command_line(const struct command_line *line, int *status, bool *need_exit)
 {
@@ -361,11 +357,13 @@ execute_command_line(const struct command_line *line, int *status, bool *need_ex
 
 	if (line->exprs.size() == 1) {
 		assert(line->exprs.front().type == EXPR_TYPE_COMMAND);
-		if (process_expr_command(&line->exprs.front(), out_fd, status, need_exit) != 0) {
+		
+		const command *cmd = &line->exprs.front().cmd.value();
+		if (process_command(cmd, out_fd, status, need_exit) != 0) {
 			*status = STATUS_INTERNAL_ERROR;
 		}
 	} else {
-		std::vector<const expr*> piped_exprs;
+		std::vector<const command*> piped_cmds;
 		for (const expr &e : line->exprs) {
 			switch (e.type) {
 			case EXPR_TYPE_PIPE:
@@ -375,13 +373,13 @@ execute_command_line(const struct command_line *line, int *status, bool *need_ex
 				assert(false); // Unsupported AND/OR expression.
 				break;
 			case EXPR_TYPE_COMMAND:
-				piped_exprs.push_back(&e);
+				piped_cmds.push_back(&e.cmd.value());
 				break;
 			default:
 				assert(false); // Unsupported expression type.
 			}
 		}
-		if (process_expr_commands_pipe(piped_exprs.data(), piped_exprs.size(), out_fd, status, need_exit) != 0) {
+		if (process_commands_pipe(piped_cmds.data(), piped_cmds.size(), out_fd, status, need_exit) != 0) {
 			*status = STATUS_INTERNAL_ERROR;
 		}
 	}
