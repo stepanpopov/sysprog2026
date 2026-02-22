@@ -69,6 +69,7 @@ printf_verbose_command_line(const struct command_line *line)
 	for (const expr &e : line->exprs) {
 		if (e.type == EXPR_TYPE_COMMAND) {
 			printf("\tCommand: %s", e.cmd->exe.c_str());
+			printf(" %zu args", e.cmd->args.size());
 			for (const std::string& arg : e.cmd->args)
 				printf(" %s", arg.c_str());
 			printf("\n");
@@ -85,7 +86,7 @@ printf_verbose_command_line(const struct command_line *line)
 }
 
 static void
-execute_command(const command *cmd)
+execute_command_child(const command *cmd)
 {
 	// TODO: add cd and exit support.
 	assert(cmd != NULL);
@@ -102,7 +103,7 @@ execute_command(const command *cmd)
 }
 
 static void
-execute_command_fds(const command *cmd, int stdin_fd, int stdout_fd)
+execute_command_child_fds(const command *cmd, int stdin_fd, int stdout_fd)
 {
 	assert(cmd != NULL);
 
@@ -124,7 +125,7 @@ execute_command_fds(const command *cmd, int stdin_fd, int stdout_fd)
 		close(stdout_fd);
 	}
 
-	execute_command(cmd);
+	execute_command_child(cmd);
 	_exit(1);
 }
 
@@ -140,9 +141,22 @@ get_home_directory()
 	return getenv("HOME");
 }
 
+// static int last_exit_code = 0;
+
+#define STATUS_CD_FAILED 1
+#define STATUS_EXIT_FAILED_TOO_MANY_ARGS 1
+#define STATUS_EXIT_FAILED_INVALID_ARG 2
+
+// TODO: support exit.
+
 static void
-execute_command_builtin(const command *cmd, bool is_output_piped)
-{	
+execute_command_builtin(const command *cmd, bool is_in_pipe, int *status, bool *need_exit)
+{
+	int last_status = *status;
+
+	*need_exit = false;
+	*status = 0; 
+	
 	if (cmd->exe == "cd") {
 		const char *path;
 		if (cmd->args.empty()) {
@@ -155,61 +169,102 @@ execute_command_builtin(const command *cmd, bool is_output_piped)
 		path = cmd->args[0].c_str();
 		if (chdir(path) != 0) {
 			perror("cd");
+			*status = STATUS_CD_FAILED;
 		}
 	} else if (cmd->exe == "exit") {
 		if (cmd->args.size() > 1) {
 			fprintf(stderr, "exit: too many arguments\n");
+			*status = STATUS_EXIT_FAILED_TOO_MANY_ARGS;
 			return;
 		}
 
-		int exit_code = 0;
 		if (cmd->args.size() == 1) {
 			char *endptr;
-			exit_code = strtol(cmd->args[0].c_str(), &endptr, 10) % 256;
+			*status = strtol(cmd->args[0].c_str(), &endptr, 10);
 			if (*endptr != '\0') {
 				fprintf(stderr, "exit: numeric argument required\n");
-				exit_code = 2;
+				*status = STATUS_EXIT_FAILED_INVALID_ARG;
 			}
+		} else {
+			*status = last_status;
 		}
 
-		if (is_output_piped) {
+		if (is_in_pipe) {
 			return;
 		}
 
-		exit(exit_code);
+		*need_exit = true;
 	} else {
 		assert(false);
 	}
 }
 
+static int 
+waitpid_exit_code(pid_t pid) 
+{
+    int status;
+    pid_t result = waitpid(pid, &status, 0);
+    
+    if (result == -1) {
+        perror("waitpid failed");
+        return -1;
+    }
+    
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    } 
+    else if (WIFSIGNALED(status)) {
+        int sig = WTERMSIG(status);
+        return 128 + sig;
+    }
+    
+    return 255;
+}
+
 // TODO: replace with cmd.
 
 static int
-process_expr_command(const expr *e, int out_fd)
+process_expr_command(const expr *e, int out_fd, int *status, bool *need_exit)
 {
+	assert(status != NULL);
+	assert(need_exit != NULL);
 	assert(e->type == EXPR_TYPE_COMMAND);
+
+	const command *cmd = &(*e->cmd);
+
+	if (is_builtin_command(cmd)) {
+		execute_command_builtin(cmd, false, status, need_exit);
+		return 0;
+	}
+	*need_exit = false;
 
 	pid_t pid = fork();
 	if (pid < 0) {
 		perror("fork");
 		return -1;
 	} else if (pid == 0) {
-    	execute_command_fds(&(*e->cmd), -1, out_fd);
+    	execute_command_child_fds(&(*e->cmd), -1, out_fd);
 	}
 	assert(pid > 0);
 
-	int status;
-	waitpid(pid, &status, 0);
+	int status_res = waitpid_exit_code(pid);
+	if (status_res < 0) {
+		return -1;
+	}
+	*status = status_res;
 
 	return 0;
 }
 
 static int 
-process_expr_commands_pipe(const expr **exprs, size_t num, int out_fd)
+process_expr_commands_pipe(const expr **exprs, size_t num, int out_fd, int *status, bool *need_exit)
 {
 	assert(num > 0);
     
     pid_t *pids = new pid_t[num];
+	memset(pids, -1, num * sizeof(pid_t));
+
+	pid_t last_pid = -1;
     int prev_pipe_read = -1;
     int result = 0;
     
@@ -217,13 +272,18 @@ process_expr_commands_pipe(const expr **exprs, size_t num, int out_fd)
         assert(exprs[i]->type == EXPR_TYPE_COMMAND);
 		const command *cmd = &(*exprs[i]->cmd);
 
-		bool is_last = (i == num - 1);
 		if (is_builtin_command(cmd)) {
-			execute_command_builtin(cmd, !is_last);
+			if (prev_pipe_read != -1) {
+                close(prev_pipe_read);
+				prev_pipe_read = -1;
+            }
+
+			execute_command_builtin(cmd, true, status, need_exit);
 			continue;
 		}
+
+		bool is_last = (i == num - 1);
 		
-        
         int curr_pipe[2];
         if (!is_last) {
             if (pipe(curr_pipe) == -1) {
@@ -241,7 +301,7 @@ process_expr_commands_pipe(const expr **exprs, size_t num, int out_fd)
 
         	int stdout_fd = is_last ? out_fd : curr_pipe[1];
 	
-			execute_command_fds(cmd, prev_pipe_read, stdout_fd);
+			execute_command_child_fds(cmd, prev_pipe_read, stdout_fd);
 		} else if (pid > 0) {
             pids[i] = pid;
             
@@ -263,11 +323,24 @@ process_expr_commands_pipe(const expr **exprs, size_t num, int out_fd)
         }
     }
     
-    // Wait for all children
-    for (size_t i = 0; i < num; i++) {
+    for (size_t i = 0; i < num - 1; i++) {
+		if (pids[i] == -1)
+			continue;
+
         int status;
         waitpid(pids[i], &status, 0);
     }
+
+	last_pid = pids[num - 1];
+	if (last_pid != -1) {
+		int status_res = waitpid_exit_code(last_pid);
+		if (status_res < 0) {
+			result = -1;
+			goto cleanup;
+		}
+		*status = status_res;
+		*need_exit = false;
+	}
 
 cleanup:
 	if (prev_pipe_read != -1) {
@@ -321,6 +394,7 @@ cleanup:
 // 	return 0;
 // }
 
+// Returns -1 if open file failed, 0 in other case.
 static int
 get_out_fd_command_line(const struct command_line *line, int *out_fd)
 {
@@ -378,24 +452,33 @@ get_out_fd_command_line(const struct command_line *line, int *out_fd)
 // 	return 0;
 // }
 
+// TODO: 
+// - return
+
+#define STATUS_INTERNAL_ERROR 255
+#define STATUS_OUTPUT_FORWARD_FAILED 1
+
 static void
-execute_command_line(const struct command_line *line)
+execute_command_line(const struct command_line *line, int *status, bool *need_exit)
 {
 	// printf_verbose_command_line(line);
 
 	if (line->exprs.empty())
 		return;
 
+	*need_exit = false;
 	
 	int out_fd;
 	if (get_out_fd_command_line(line, &out_fd) != 0) {
-		// TODO: handle error
+		*status = STATUS_OUTPUT_FORWARD_FAILED;
 		return;
 	}
 
 	if (line->exprs.size() == 1) {
 		assert(line->exprs.front().type == EXPR_TYPE_COMMAND);
-		process_expr_command(&line->exprs.front(), out_fd);
+		if (process_expr_command(&line->exprs.front(), out_fd, status, need_exit) != 0) {
+			*status = STATUS_INTERNAL_ERROR;
+		}
 	} else {
 		std::vector<const expr*> piped_exprs;
 		for (const expr &e : line->exprs) {
@@ -404,23 +487,30 @@ execute_command_line(const struct command_line *line)
 				break;
 			case EXPR_TYPE_AND:
 			case EXPR_TYPE_OR:
-				assert(("Unsupported AND/OR expression", false)); // TODO: support AND and OR
+				// assert(("Unsupported AND/OR expression", false)); // TODO: support AND and OR
 				break;
 			case EXPR_TYPE_COMMAND:
 				piped_exprs.push_back(&e);
 				break;
 			default:
-				assert(("Unsupported expression type", false));
+				assert(false);
+				// assert(("Unsupported expression type", false));
 			}
 		}
-		process_expr_commands_pipe(piped_exprs.data(), piped_exprs.size(), out_fd);
+		if (process_expr_commands_pipe(piped_exprs.data(), piped_exprs.size(), out_fd, status, need_exit) != 0) {
+			*status = STATUS_INTERNAL_ERROR;
+		}
 	}
 	close(out_fd);
 }
 
+
 int
 main(void)
 {
+	// signal(SIGTERM, sigterm_handler);
+	int last_status = 0;
+
 	const size_t buf_size = 1024;
 	char buf[buf_size];
 	int rc;
@@ -436,10 +526,20 @@ main(void)
 				printf("Error: %d\n", (int)err);
 				continue;
 			}
-			execute_command_line(line);
+
+			int status = 0;
+			bool need_exit = false;
+			execute_command_line(line, &status, &need_exit);
+
+			last_status = status;
 			delete line;
+			if (need_exit) {
+				goto out;
+			}
 		}
 	}
+
+out:
 	parser_delete(p);
-	return 0;
+	return last_status;
 }
