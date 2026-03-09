@@ -23,8 +23,8 @@
  * It is important to define these macros here, in the header,
  * because it is used by tests.
  */
-#define NEED_OPEN_FLAGS 0
-#define NEED_RESIZE 0
+#define NEED_OPEN_FLAGS 1
+#define NEED_RESIZE 1
 
 /**
  * Flags for ufs_open call.
@@ -67,7 +67,7 @@ enum ufs_error_code {
 };
 
 /** Get code of the last error. */
-ufs_error_code
+enum ufs_error_code
 ufs_errno();
 
 /**
