@@ -57,10 +57,9 @@ thread_pool_worker(void *arg)
 			pool->running_tasks--;
 		}
 
-		if (pool->task_queue.empty()) {
+		while (pool->task_queue.empty() && !pool->stop) {
 			pthread_cond_wait(&pool->task_queue_cond, &pool->task_queue_lock);
 		}
-
 		if (pool->stop) {
 			pthread_mutex_unlock(&pool->task_queue_lock);
 			break;
@@ -116,6 +115,7 @@ thread_pool_new(int thread_count, struct thread_pool **pool)
 	*pool = new thread_pool;
 	(*pool)->max_threads = thread_count;
 	(*pool)->running_tasks = 0;
+	(*pool)->stop = false;
 
 	pthread_mutex_init(&(*pool)->threads_lock, NULL);
 	pthread_mutex_init(&(*pool)->task_queue_lock, NULL);
@@ -162,16 +162,15 @@ thread_pool_push_task(struct thread_pool *pool, struct thread_task *task)
 
 
 	pthread_mutex_lock(&pool->task_queue_lock);
-	if (pool->task_queue.size() + pool->running_tasks > TPOOL_MAX_TASKS) {
+	if (pool->task_queue.size() + pool->running_tasks >= TPOOL_MAX_TASKS) {
 		pthread_mutex_unlock(&pool->task_queue_lock);
 		return TPOOL_ERR_TOO_MANY_TASKS;
 	}
 
 	pool->task_queue.push_back(task);
 	pthread_cond_signal(&pool->task_queue_cond);
-	pthread_mutex_unlock(&pool->task_queue_lock);
-
 	__atomic_store_n(&task->state, PUSHED, __ATOMIC_RELEASE);
+	pthread_mutex_unlock(&pool->task_queue_lock);
 	return 0;
 }
 
@@ -210,7 +209,7 @@ thread_task_join(struct thread_task *task)
 	}
 
 	pthread_mutex_lock(&task->lock);
-	if (!task->ready_to_join) {
+	while (!task->ready_to_join) {
 		pthread_cond_wait(&task->cond, &task->lock);
 	}
 	pthread_mutex_unlock(&task->lock);
