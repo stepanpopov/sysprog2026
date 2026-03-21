@@ -16,17 +16,10 @@ struct thread_task {
 	enum thread_task_state state;
 	bool detached;
 	bool ready_to_join;
-	// bool running;
-	// bool executed;
-	// bool joined;
 
 	pthread_cond_t cond;
 	pthread_mutex_t lock;
-
-	/* PUT HERE OTHER MEMBERS */
 };
-
-
 
 struct thread_pool {
 	std::vector<pthread_t> threads;
@@ -41,8 +34,6 @@ struct thread_pool {
 	int max_threads;
 
 	bool stop;
-
-	/* PUT HERE OTHER MEMBERS */
 };
 
 static void *
@@ -101,7 +92,6 @@ thread_pool_add_worker(struct thread_pool *pool)
 
 	return 0;
 }
-
 
 int
 thread_pool_new(int thread_count, struct thread_pool **pool)
