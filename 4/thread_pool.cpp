@@ -49,14 +49,9 @@ static void *
 thread_pool_worker(void *arg)
 {
 	struct thread_pool *pool = (struct thread_pool *)arg;
-	bool task_finished = false;
 
 	for (;;) {
 		pthread_mutex_lock(&pool->task_queue_lock);
-		if (task_finished) {
-			pool->running_tasks--;
-		}
-
 		while (pool->task_queue.empty() && !pool->stop) {
 			pthread_cond_wait(&pool->task_queue_cond, &pool->task_queue_lock);
 		}
@@ -75,6 +70,10 @@ thread_pool_worker(void *arg)
 		__atomic_store_n(&task->state, RUNNING, __ATOMIC_RELEASE);
 		task->function();
 
+		pthread_mutex_lock(&pool->task_queue_lock);
+		pool->running_tasks--;
+		pthread_mutex_unlock(&pool->task_queue_lock);
+
 		if (task->detached) {
 			__atomic_store_n(&task->state, JOINED, __ATOMIC_RELEASE);
 			continue;
@@ -85,8 +84,6 @@ thread_pool_worker(void *arg)
 		task->ready_to_join = true;
 		pthread_cond_signal(&task->cond);
 		pthread_mutex_unlock(&task->lock);
-
-		task_finished = true;
 	}
 	return NULL;
 }
@@ -167,6 +164,7 @@ thread_pool_push_task(struct thread_pool *pool, struct thread_task *task)
 		return TPOOL_ERR_TOO_MANY_TASKS;
 	}
 
+	task->ready_to_join = false;
 	pool->task_queue.push_back(task);
 	pthread_cond_signal(&pool->task_queue_cond);
 	__atomic_store_n(&task->state, PUSHED, __ATOMIC_RELEASE);
