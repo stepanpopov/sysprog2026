@@ -142,6 +142,10 @@ thread_pool_delete(struct thread_pool *pool)
 	}
 	pthread_mutex_unlock(&pool->threads_lock);
 
+	pthread_mutex_destroy(&pool->threads_lock);
+	pthread_mutex_destroy(&pool->task_queue_lock);
+	pthread_cond_destroy(&pool->task_queue_cond);
+
 	delete pool;
 	return 0;
 }
@@ -150,7 +154,7 @@ int
 thread_pool_push_task(struct thread_pool *pool, struct thread_task *task)
 {
 	pthread_mutex_lock(&pool->threads_lock);
-	if (pool->threads.size() < pool->max_threads) {
+	if (int(pool->threads.size()) < pool->max_threads) {
 		int err = thread_pool_add_worker(pool);
 		assert (err == 0);
 	}
@@ -235,6 +239,9 @@ thread_task_delete(struct thread_task *task)
 	if (state != CREATED && state != JOINED) {
 		return TPOOL_ERR_TASK_IN_POOL;
 	}
+	pthread_mutex_destroy(&task->lock);
+	pthread_cond_destroy(&task->cond);
+
 	delete task;
 	return 0;
 }
