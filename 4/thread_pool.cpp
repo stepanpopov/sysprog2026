@@ -4,6 +4,8 @@
 #include <assert.h>
 #include <cerrno>
 
+#define NSEC_IN_SEC 1000000000L
+
 enum thread_task_state {
 	CREATED,
 	PUSHED,
@@ -131,7 +133,11 @@ thread_task_waiter_timeout(pthread_cond_t *cond, pthread_mutex_t *mutex, double 
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	ts.tv_sec += (time_t)timeout;
-	ts.tv_nsec += (long)((timeout - (time_t)timeout) * 1e9);
+	ts.tv_nsec += (long)((timeout - (time_t)timeout) * NSEC_IN_SEC);
+	if (ts.tv_nsec >= NSEC_IN_SEC) {
+		ts.tv_sec += 1;
+		ts.tv_nsec -= NSEC_IN_SEC;
+	}
 
 	return pthread_cond_timedwait(cond, mutex, &ts) == 0;
 }
@@ -170,12 +176,7 @@ thread_pool_new(int thread_count, struct thread_pool **pool)
 
 	pthread_mutex_init(&(*pool)->threads_lock, NULL);
 	pthread_mutex_init(&(*pool)->task_queue_lock, NULL);
-
-	pthread_condattr_t cond_attr;
-	pthread_condattr_init(&cond_attr);
-	pthread_condattr_setclock(&cond_attr, CLOCK_MONOTONIC);
-	pthread_cond_init(&(*pool)->task_queue_cond, &cond_attr);
-	pthread_condattr_destroy(&cond_attr);
+	pthread_cond_init(&(*pool)->task_queue_cond, NULL);
 	
 	return 0;
 }
