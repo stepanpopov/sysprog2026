@@ -2,6 +2,7 @@
 
 #include <pthread.h>
 #include <assert.h>
+#include <cerrno>
 
 enum thread_task_state {
 	CREATED,
@@ -102,6 +103,60 @@ thread_pool_add_worker(struct thread_pool *pool)
 	return 0;
 }
 
+// Cond waiter begin.
+typedef bool (*thread_task_waiter_f)(pthread_cond_t *cond, pthread_mutex_t *mutex, double timeout);
+
+static bool
+thread_task_waiter(pthread_cond_t *cond, pthread_mutex_t *mutex, double _timeout)
+{
+	(void)_timeout;
+
+	pthread_cond_wait(cond, mutex);
+	return true;
+}
+
+static bool
+thread_task_waiter_nop(pthread_cond_t *_cond, pthread_mutex_t *_mutex, double _timeout)
+{
+	(void)_cond;
+	(void)_mutex;
+	(void)_timeout;
+
+	return false;
+}
+
+static bool
+thread_task_waiter_timeout(pthread_cond_t *cond, pthread_mutex_t *mutex, double timeout)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	ts.tv_sec += (time_t)timeout;
+	ts.tv_nsec += (long)((timeout - (time_t)timeout) * 1e9);
+
+	return pthread_cond_timedwait(cond, mutex, &ts) == 0;
+}
+
+static int
+thread_task_join_general(struct thread_task *task, thread_task_waiter_f waiter, double timeout)
+{
+	if (__atomic_load_n(&task->state, __ATOMIC_ACQUIRE) == CREATED) {
+		return TPOOL_ERR_TASK_NOT_PUSHED;
+	}
+
+	pthread_mutex_lock(&task->lock);
+	while (!task->ready_to_join) {
+		if (!waiter(&task->cond, &task->lock, timeout)) {
+			pthread_mutex_unlock(&task->lock);
+			return TPOOL_ERR_TIMEOUT;
+		}
+	}
+	pthread_mutex_unlock(&task->lock);
+	
+	__atomic_store_n(&task->state, JOINED, __ATOMIC_RELEASE);
+	return 0;
+}
+// Cond waiter end.
+
 int
 thread_pool_new(int thread_count, struct thread_pool **pool)
 {
@@ -115,7 +170,12 @@ thread_pool_new(int thread_count, struct thread_pool **pool)
 
 	pthread_mutex_init(&(*pool)->threads_lock, NULL);
 	pthread_mutex_init(&(*pool)->task_queue_lock, NULL);
-	pthread_cond_init(&(*pool)->task_queue_cond, NULL);
+
+	pthread_condattr_t cond_attr;
+	pthread_condattr_init(&cond_attr);
+	pthread_condattr_setclock(&cond_attr, CLOCK_MONOTONIC);
+	pthread_cond_init(&(*pool)->task_queue_cond, &cond_attr);
+	pthread_condattr_destroy(&cond_attr);
 	
 	return 0;
 }
@@ -181,7 +241,12 @@ thread_task_new(struct thread_task **task, const thread_task_f &function)
 	(*task)->ready_to_join = false;
 
 	pthread_mutex_init(&(*task)->lock, NULL);
-	pthread_cond_init(&(*task)->cond, NULL);
+
+	pthread_condattr_t cond_attr;
+	pthread_condattr_init(&cond_attr);
+	pthread_condattr_setclock(&cond_attr, CLOCK_MONOTONIC);
+	pthread_cond_init(&(*task)->cond, &cond_attr);
+	pthread_condattr_destroy(&cond_attr);
 
 	return 0;
 }
@@ -201,18 +266,7 @@ thread_task_is_running(const struct thread_task *task)
 int
 thread_task_join(struct thread_task *task)
 {
-	if (__atomic_load_n(&task->state, __ATOMIC_ACQUIRE) == CREATED) {
-		return TPOOL_ERR_TASK_NOT_PUSHED;
-	}
-
-	pthread_mutex_lock(&task->lock);
-	while (!task->ready_to_join) {
-		pthread_cond_wait(&task->cond, &task->lock);
-	}
-	pthread_mutex_unlock(&task->lock);
-	
-	__atomic_store_n(&task->state, JOINED, __ATOMIC_RELEASE);
-	return 0;
+	return thread_task_join_general(task, thread_task_waiter, 0);
 }
 
 #if NEED_TIMED_JOIN
@@ -220,10 +274,10 @@ thread_task_join(struct thread_task *task)
 int
 thread_task_timed_join(struct thread_task *task, double timeout)
 {
-	/* IMPLEMENT THIS FUNCTION */
-	(void)task;
-	(void)timeout;
-	return TPOOL_ERR_NOT_IMPLEMENTED;
+	if (timeout <= 0) {
+		return thread_task_join_general(task, thread_task_waiter_nop, 0);
+	}
+	return thread_task_join_general(task, thread_task_waiter_timeout, timeout);
 }
 
 #endif
