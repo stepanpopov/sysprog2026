@@ -36,6 +36,15 @@ struct thread_pool {
 	bool stop;
 };
 
+static void
+thread_task_destroy_unsafe(struct thread_task *task)
+{
+	pthread_mutex_destroy(&task->lock);
+	pthread_cond_destroy(&task->cond);
+
+	delete task;
+}
+
 static void *
 thread_pool_worker(void *arg)
 {
@@ -64,13 +73,14 @@ thread_pool_worker(void *arg)
 		pool->running_tasks--;
 		pthread_mutex_unlock(&pool->task_queue_lock);
 
+		__atomic_store_n(&task->state, EXECUTED, __ATOMIC_RELEASE);
+		
+		pthread_mutex_lock(&task->lock);
 		if (task->detached) {
-			__atomic_store_n(&task->state, JOINED, __ATOMIC_RELEASE);
+			pthread_mutex_unlock(&task->lock);
+			thread_task_destroy_unsafe(task);
 			continue;
 		}
-		__atomic_store_n(&task->state, EXECUTED, __ATOMIC_RELEASE);
-
-		pthread_mutex_lock(&task->lock);
 		task->ready_to_join = true;
 		pthread_cond_signal(&task->cond);
 		pthread_mutex_unlock(&task->lock);
@@ -225,10 +235,8 @@ thread_task_delete(struct thread_task *task)
 	if (state != CREATED && state != JOINED) {
 		return TPOOL_ERR_TASK_IN_POOL;
 	}
-	pthread_mutex_destroy(&task->lock);
-	pthread_cond_destroy(&task->cond);
-
-	delete task;
+	thread_task_destroy_unsafe(task);
+	
 	return 0;
 }
 
@@ -237,9 +245,20 @@ thread_task_delete(struct thread_task *task)
 int
 thread_task_detach(struct thread_task *task)
 {
-	/* IMPLEMENT THIS FUNCTION */
-	(void)task;
-	return TPOOL_ERR_NOT_IMPLEMENTED;
+	if (__atomic_load_n(&task->state, __ATOMIC_ACQUIRE) == CREATED) {
+		return TPOOL_ERR_TASK_NOT_PUSHED;
+	}
+
+	pthread_mutex_lock(&task->lock);
+	if (task->ready_to_join) {
+		pthread_mutex_unlock(&task->lock);
+		thread_task_destroy_unsafe(task);
+		return 0;
+	}
+	task->detached = true;
+	pthread_mutex_unlock(&task->lock);
+
+	return 0;
 }
 
 #endif
