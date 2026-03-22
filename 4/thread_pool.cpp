@@ -57,8 +57,7 @@ thread_pool_worker(void *arg)
 		pool->running_tasks++;
 		pthread_mutex_unlock(&pool->task_queue_lock);
 
-		// TODO: memorder.
-		__atomic_store_n(&task->state, RUNNING, __ATOMIC_RELEASE);
+		__atomic_store_n(&task->state, RUNNING, __ATOMIC_SEQ_CST);
 		task->function();
 
 		pthread_mutex_lock(&pool->task_queue_lock);
