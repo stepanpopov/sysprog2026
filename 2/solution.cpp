@@ -6,6 +6,7 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <string.h>
+#include <list>
 
 // #define DEBUG_CMD // Uncomment for debug.
 
@@ -73,9 +74,9 @@ static void execute_command_child(const command *cmd);
 static void execute_command_child_fds(const command *cmd, int stdin_fd, int stdout_fd);
 static void execute_command_builtin(const command *cmd, bool is_in_pipe, int *status, bool *need_exit);
 
-static pid_t *spawn_pipeline(const command **cmds, size_t num,
+static pid_t *spawn_pipeline(const command *const *cmds, size_t num,
 	const struct output *out, int *status, bool *need_exit);
-static void execute_command_line(const struct command_line *line, int *status, bool *need_exit);
+static void execute_command_line(const struct command_line *line, int *status, bool *need_exit, pid_t *background_pid);
 
 // ----------------------------------------
 
@@ -117,7 +118,19 @@ waitpid_exit_code(pid_t pid)
         return 128 + sig;
     }
     
-    return 255;
+    return STATUS_INTERNAL_ERROR;
+}
+
+static int
+get_eof_fd()
+{
+	int eof_pipe[2];
+	if (pipe(eof_pipe) == -1) {
+		perror("pipe");
+		return -1;
+	}
+	close(eof_pipe[1]);
+	return eof_pipe[0];
 }
 
 static void
@@ -176,9 +189,10 @@ execute_command_builtin(const command *cmd, bool is_in_pipe, int *status, bool *
 			if (path == NULL) {
 				return;
 			}
+		} else {
+			path = cmd->args[0].c_str();
 		}
 		
-		path = cmd->args[0].c_str();
 		if (chdir(path) != 0) {
 			perror("cd");
 			*status = STATUS_CD_FAILED;
@@ -212,11 +226,10 @@ execute_command_builtin(const command *cmd, bool is_in_pipe, int *status, bool *
 }
 
 static pid_t *
-spawn_pipeline(const command **cmds, size_t num,
+spawn_pipeline(const command *const *cmds, size_t num,
 	const struct output *out, int *status, bool *need_exit)
 {
 	assert(num > 0);
-	assert(out != NULL);
 
 	pid_t *pids = new pid_t[num];
 	memset(pids, -1, num * sizeof(pid_t));
@@ -232,8 +245,15 @@ spawn_pipeline(const command **cmds, size_t num,
 		if (is_builtin_command(cmd)) {
 			if (prev_pipe_read != -1) {
 				close(prev_pipe_read);
-				prev_pipe_read = -1;
 			}
+
+			int eof_fd = get_eof_fd();
+			if (eof_fd == -1) {
+				error_occurred = true;
+			    goto cleanup_out;
+			}
+			prev_pipe_read = eof_fd;
+
 			execute_command_builtin(cmd, is_pipe, status, need_exit);
 			continue;
 		}
@@ -256,9 +276,10 @@ spawn_pipeline(const command **cmds, size_t num,
 				close(curr_pipe[0]);
 
 			int stdout_fd = -1;
-            if (is_last && is_output_file(out)) {
+            if (is_last && out != NULL && is_output_file(out)) {
                 stdout_fd = open_output_file_child(out);
                 if (stdout_fd == -1) {
+					perror("open_output_file_child");
                     _exit(STATUS_OUTPUT_FORWARD_FAILED);
                 }
             } else if (!is_last) {
@@ -295,8 +316,86 @@ cleanup_out:
 	return pids;
 }
 
+struct pipeline_res {
+	bool need_exit;
+	int status;
+};
+	
+static pipeline_res
+execute_pipeline(const std::vector<const command *> &cmds, const output *out)
+{
+	bool need_exit = false;
+	int status = 0;
+
+	pid_t *pids = spawn_pipeline(cmds.data(), cmds.size(), out,
+		&status, &need_exit);
+	if (pids == NULL) {
+		status = STATUS_INTERNAL_ERROR;
+		return {need_exit, status};
+	}
+
+	for (size_t i = 0; i < cmds.size() - 1; i++) {
+		if (pids[i] != -1) {
+			int s;
+			waitpid(pids[i], &s, 0);
+		}
+	}
+	
+	pid_t last = pids[cmds.size() - 1];
+	if (last != -1) {
+		int status_waitpid = waitpid_exit_code(last);
+		if (status_waitpid >= 0) {
+			status = status_waitpid;
+			need_exit = false;
+		} else {
+			status = STATUS_INTERNAL_ERROR;
+		}
+	}
+
+	delete[] pids;
+
+	return {need_exit, status};
+}
+
+enum pipe_execute_cond {
+	ALWAYS,
+	PREV_SUCCESS,
+	PREV_FAILED,
+};
+
+struct pipeline {
+	std::vector<const command *> cmds;
+	enum pipe_execute_cond cond;
+};
+
+static pipeline_res
+execute_pipelines(const std::vector<pipeline> &pipelines, const output *out)
+{
+	bool need_exit = false;
+	int status = 0;
+
+	for (size_t i = 0; i < pipelines.size(); i++) {
+		const pipeline &p = pipelines[i];
+
+		if (p.cond == PREV_SUCCESS && status != 0) 
+			continue;
+		if (p.cond == PREV_FAILED && status == 0) 
+			continue;
+
+		struct pipeline_res res = execute_pipeline(p.cmds, i == pipelines.size() - 1 ? out : NULL);
+		assert(res.status >= 0 && res.status != STATUS_INTERNAL_ERROR);
+		status = res.status;
+		if (res.need_exit) {
+			need_exit = true;
+			break;
+		}
+	}
+
+	return {need_exit, status};
+}
+
 static void
-execute_command_line(const struct command_line *line, int *status, bool *need_exit)
+execute_command_line(const struct command_line *line, int *status, bool *need_exit, pid_t *background_pid)
 {
 #ifdef DEBUG_CMD
 	printf_debug_verbose_command_line(line);
@@ -305,61 +404,79 @@ execute_command_line(const struct command_line *line, int *status, bool *need_ex
 	if (line->exprs.empty())
 		return;
 
-	*need_exit = false;
+	std::vector<pipeline> pipelines;
+	pipelines.push_back({{}, ALWAYS});
 
-	// Collect commands from expressions.
-	std::vector<const command *> cmds;
 	for (const expr &e : line->exprs) {
 		switch (e.type) {
 		case EXPR_TYPE_PIPE:
 			break;
 		case EXPR_TYPE_AND:
+			pipelines.push_back({{}, PREV_SUCCESS});
+			break;
 		case EXPR_TYPE_OR:
-			assert(false);
+			pipelines.push_back({{}, PREV_FAILED});
 			break;
 		case EXPR_TYPE_COMMAND:
-			cmds.push_back(&e.cmd.value());
+			pipelines.back().cmds.push_back(&e.cmd.value());
 			break;
 		default:
 			assert(false);
 		}
 	}
 
+	assert(!pipelines.back().cmds.empty());
+
 	const struct output out = {
 		.type = line->out_type,
 		.file = line->out_file.c_str(),
 	};
 
-	pid_t *pids = spawn_pipeline(cmds.data(), cmds.size(), &out,
-		status, need_exit);
-	if (pids == NULL) {
-		*status = STATUS_INTERNAL_ERROR;
+	if (!line->is_background) {
+		struct pipeline_res res = execute_pipelines(pipelines, &out);
+		*status = res.status;
+		*need_exit = res.need_exit;
 		return;
 	}
 
-	if (!line->is_background) {
-		for (size_t i = 0; i + 1 < cmds.size(); i++) {
-			if (pids[i] != -1) {
-				int s;
-				waitpid(pids[i], &s, 0);
-			}
+	pid_t pid = fork();
+	if (pid == 0) {
+		int eof_fd = get_eof_fd();
+		if (eof_fd == -1) {
+			perror("get_eof_fd");
+			_exit(STATUS_INTERNAL_ERROR);
 		}
-		
-		pid_t last = pids[cmds.size() - 1];
-		if (last != -1) {
-			int status_res = waitpid_exit_code(last);
-			if (status_res >= 0) {
-				*status = status_res;
-				*need_exit = false;
-			} else {
-				*status = STATUS_INTERNAL_ERROR;
-			}
+		if (dup2(eof_fd, STDIN_FILENO) == -1) {
+			perror("dup2");
+			_exit(STATUS_INTERNAL_ERROR);
 		}
-	} else {
-		*status = 0;
-	}
+		close(eof_fd);
 
-	delete[] pids;
+        struct pipeline_res res = execute_pipelines(pipelines, &out);
+        _exit(res.status);
+	} else if (pid > 0) {
+        *background_pid = pid;
+		*status = 0;
+		*need_exit = false;
+	} else {
+		perror("fork");
+		*status = STATUS_INTERNAL_ERROR;
+	}
+}
+
+static void
+background_gc(std::list<pid_t> &pids)
+{
+	auto it = pids.begin();
+	while (it != pids.end()) {
+		int st = 0;
+		pid_t res = waitpid(*it, &st, WNOHANG);
+		if (res != 0) {
+			it = pids.erase(it);
+			continue;
+		}
+		it++;
+	}
 }
 
 
@@ -367,6 +484,7 @@ int
 main(void)
 {
 	int last_status = 0;
+    std::list<pid_t> background_pids;
 
 	const size_t buf_size = 1024;
 	char buf[buf_size];
@@ -386,17 +504,25 @@ main(void)
 
 			int status = 0;
 			bool need_exit = false;
-			execute_command_line(line, &status, &need_exit);
+            pid_t background_pid = -1;
+			execute_command_line(line, &status, &need_exit, &background_pid);
+			delete line;
 
 			last_status = status;
-			delete line;
+			if (background_pid != -1) {
+				background_pids.push_back(background_pid);
+			}
+
 			if (need_exit) {
 				goto out;
 			}
+
+			background_gc(background_pids);
 		}
 	}
 
 out:
 	parser_delete(p);
+	background_gc(background_pids);
 	return last_status;
 }
